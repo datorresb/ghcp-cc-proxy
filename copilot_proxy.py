@@ -367,9 +367,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "keep-alive")
+                self.send_header("Connection", "close")
                 self.end_headers()
                 _stream_from_copilot_sse(resp, self.wfile, original_model)
+                self.wfile.flush()
             else:
                 oai_data = json.loads(resp.read())
                 anthropic_resp = _openai_to_anthropic(oai_data, original_model)

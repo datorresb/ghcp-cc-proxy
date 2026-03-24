@@ -1,100 +1,103 @@
-# ghcp-cc-proxy
+# GitHub Copilot → Claude Code Proxy
 
-Use **Claude Code** with your **GitHub Copilot** subscription. A single Python proxy (~300 lines, zero dependencies) translates Anthropic's Messages API into Copilot's chat completions endpoint.
+Lightweight Python proxy (zero dependencies) that lets Claude Code use GitHub Copilot's Anthropic models.
 
 ```
-┌─────────────┐     ┌───────────────────┐     ┌──────────────────┐
-│ Claude Code  │────▶│  copilot_proxy.py │────▶│ GitHub Copilot   │
-│ (Anthropic)  │◀────│  localhost:8080   │◀────│ (Claude models)  │
-└─────────────┘     └───────────────────┘     └──────────────────┘
+Claude Code ──▶ copilot_proxy.py ──▶ GitHub Copilot
+(Anthropic API)   localhost:8080      (Claude models)
 ```
-
-## Prerequisites
-
-- **Python 3.8+**
-- **GitHub CLI** (`gh`) — [install](https://cli.github.com)
-- **GitHub Copilot** subscription (Individual, Business, or Enterprise)
-- **Node.js 18+** (for Claude Code install)
 
 ## Quick Start
 
 ```bash
-# One-liner setup (installs Claude Code, starts proxy, configures everything)
+# 1. Clone (or open in Codespace)
+git clone https://github.com/datorresb/ghcp-cc-proxy.git && cd ghcp-cc-proxy
+
+# 2. Run setup
 ./setup.sh
 
-# Then just run:
+# 3. Start Claude Code — it auto-configures via .claude/settings.json
 claude
 ```
 
-## Manual Setup
+## Requirements
 
-```bash
-# 1. Authenticate with GitHub
-gh auth login -h github.com -p https -w
-
-# 2. Install Claude Code
-npm install -g @anthropic-ai/claude-code
-
-# 3. Start the proxy
-python3 copilot_proxy.py &
-
-# 4. Run Claude Code with the proxy
-ANTHROPIC_BASE_URL=http://localhost:8080 ANTHROPIC_AUTH_TOKEN=sk-copilot-proxy claude
-```
+- **GitHub CLI** (`gh`) authenticated with Copilot access — [install](https://cli.github.com)
+- **Python 3.8+**
 
 ## Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8080` | Proxy listen port |
-| `HOST` | `127.0.0.1` | Bind address (use `0.0.0.0` for network access) |
-| `ANTHROPIC_BASE_URL` | — | Set to `http://localhost:8080` for Claude Code |
-| `ANTHROPIC_AUTH_TOKEN` | — | Set to any non-empty string (e.g. `sk-copilot-proxy`) |
-| `DISABLE_NON_ESSENTIAL_MODEL_CALLS` | — | Set to `1` to avoid extra Anthropic API calls |
+| `HOST` | `127.0.0.1` | Bind address |
+| `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `MODELS_CACHE_TTL` | `300` | Seconds to cache `/v1/models` response |
 
-## Supported Models
+Custom model mappings can be defined in `models.json`. The proxy loads this file at startup and falls back to built-in defaults if it's missing or invalid.
 
-The proxy maps Anthropic model names to Copilot equivalents:
+## Available Models
 
-| Claude Code sends | Copilot receives |
-|-------------------|------------------|
-| `claude-opus-4-5-*` | `claude-opus-4.5` |
-| `claude-sonnet-4-*` | `claude-sonnet-4` |
-| `claude-sonnet-4-5-*` | `claude-sonnet-4.5` |
-| `claude-haiku-4-5-*` | `claude-haiku-4.5` |
+| Alias | Maps To |
+|-------|---------|
+| `claude-opus-4-6` | `claude-opus-4.6` |
+| `claude-opus-4-6-1m` | `claude-opus-4.6-1m` |
+| `claude-opus-4-6[1m]` | `claude-opus-4.6-1m` |
+| `claude-sonnet-4-6` | `claude-sonnet-4.6` |
+| `claude-haiku-4-5` | `claude-haiku-4.5` |
+| `claude-sonnet-4-20250514` | `claude-sonnet-4` |
+| `claude-3-5-sonnet-20241022` | `claude-3.5-sonnet` |
+| `opus` | `claude-opus-4.6` |
+| `opus[1m]` | `claude-opus-4.6-1m` |
+| `sonnet` | `claude-sonnet-4.6` |
+| `haiku` | `claude-haiku-4.5` |
 
-Unknown models (GPT, Gemini, etc.) are passed through as-is.
+Unknown models are passed through as-is.
 
 ## Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/v1/messages` | Anthropic Messages API (for Claude Code) |
-| `POST` | `/v1/chat/completions` | OpenAI-compatible (for Cursor, etc.) |
+| `POST` | `/v1/messages` | Anthropic Messages API |
+| `POST` | `/v1/chat/completions` | OpenAI-compatible pass-through |
+| `POST` | `/v1/messages/count_tokens` | Token counting |
 | `GET` | `/v1/models` | List available models |
 | `GET` | `/health` | Health check |
 
-## How It Works
+## Features
 
-1. Claude Code sends Anthropic Messages API requests to the proxy
-2. Proxy translates to OpenAI chat/completions format
-3. Proxy authenticates with Copilot using `gh auth token`
-4. Copilot processes the request using its Claude models
-5. Proxy translates the response back to Anthropic format
-6. Streaming is supported end-to-end (SSE)
+- **Extended thinking** — maps Anthropic `thinking` parameter to OpenAI `reasoning_effort`
+- **Image support** — base64 and URL image blocks in messages
+- **Streaming** — real-time SSE translation (OpenAI stream → Anthropic stream)
+- **Retry with backoff** — automatic retries on 429, 502, 503, 504 with exponential backoff
+- **Structured logging** — configurable log levels via `LOG_LEVEL`
+- **Token auto-management** — fetches and caches Copilot tokens, refreshes on expiry
 
-## Use in Any Project
+## Limitations
 
-Copy `copilot_proxy.py` and `setup.sh` into any repo, or run remotely:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/datorresb/ghcp-cc-proxy/main/setup.sh | bash
-```
+- No `cache_control` support (Copilot doesn't expose prompt caching)
+- No citations or PDF/document type (`pdft`) support
+- Copilot rate limits apply — the proxy retries but can't bypass them
+- Token counts are approximate (character-based estimation for `count_tokens`)
 
 ## Troubleshooting
 
-**"Cannot get Copilot token"** — Run `gh auth login` and ensure your GitHub account has Copilot access.
+| Problem | Fix |
+|---------|-----|
+| `gh auth token` fails | Run `gh auth login -h github.com -p https -w` |
+| Connection refused on 8080 | Check `PORT`, ensure the proxy is running |
+| 401 Unauthorized | Token expired — proxy auto-refreshes, but verify with `gh auth token` |
+| Model not found | Check `models.json` mapping, or use the Copilot model name directly |
+| Streaming hangs | Ensure nothing is buffering between client and proxy |
+| Rate limited (429) | Proxy retries automatically with backoff; reduce request frequency |
+| Request body too large | Body exceeds 10 MB limit; reduce payload size |
 
-**Proxy won't start** — Check `/tmp/copilot-proxy.log` for errors.
+## Architecture
 
-**Claude Code ignores proxy** — Verify `~/.claude/settings.json` contains `"apiBaseUrl": "http://localhost:8080"` or set `ANTHROPIC_BASE_URL` env var.
+Single file (`copilot_proxy.py`), Python stdlib only. Uses `ThreadingMixIn` for concurrent requests. Tokens are fetched via `gh auth token` and cached with automatic refresh.
+
+## Testing
+
+```bash
+python3 -m pytest tests/ -v
+```

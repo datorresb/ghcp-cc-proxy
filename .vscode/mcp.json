@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "backlog-md": {
+      "command": "/workspaces/ghcp-cc-proxy/.mcp-servers/backlog-md/dist/backlog",
+      "args": ["mcp", "start"],
+      "env": {
+        "BACKLOG_PATH": "/workspaces/ghcp-cc-proxy/.backlog"
+      }
+    }
+  }
+}

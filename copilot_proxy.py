@@ -23,6 +23,7 @@ import threading
 import time
 import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -292,6 +293,10 @@ def _stream_from_copilot_sse(upstream_resp, wfile, model: str):
 
 # ── HTTP handler ─────────────────────────────────────────────────────
 
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/v1/models":
@@ -450,7 +455,7 @@ def main():
     print(f"[proxy] OpenAI API:     POST http://localhost:{PORT}/v1/chat/completions")
     print(f"[proxy] Models:         GET  http://localhost:{PORT}/v1/models")
 
-    server = HTTPServer(("0.0.0.0", PORT), Handler)
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

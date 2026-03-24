@@ -47,6 +47,7 @@ ANTHROPIC_BASE_URL=http://localhost:8080 ANTHROPIC_AUTH_TOKEN=sk-copilot-proxy c
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8080` | Proxy listen port |
+| `HOST` | `127.0.0.1` | Bind address (use `0.0.0.0` for network access) |
 | `ANTHROPIC_BASE_URL` | — | Set to `http://localhost:8080` for Claude Code |
 | `ANTHROPIC_AUTH_TOKEN` | — | Set to any non-empty string (e.g. `sk-copilot-proxy`) |
 | `DISABLE_NON_ESSENTIAL_MODEL_CALLS` | — | Set to `1` to avoid extra Anthropic API calls |

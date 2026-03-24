@@ -28,6 +28,8 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 PORT = int(os.environ.get("PORT", "8080"))
+HOST = os.environ.get("HOST", "127.0.0.1")
+MAX_BODY = 10 * 1024 * 1024  # 10 MB
 TOKEN_TTL = 600  # refresh every 10 min
 
 _lock = threading.Lock()
@@ -104,16 +106,16 @@ def _anthropic_to_openai(body: dict) -> dict:
     """Convert Anthropic Messages API request → OpenAI chat/completions."""
     messages = []
 
-    # System prompt
+    # System prompt — Anthropic allows string or list of content blocks
     system = body.get("system")
     if system:
         if isinstance(system, list):
-            # Anthropic allows system as array of content blocks
             text = "\n".join(
-                b.get("text", "") for b in system if b.get("type") == "text"
+                b.get("text", "") for b in system
+                if isinstance(b, dict) and b.get("type") == "text"
             )
         else:
-            text = system
+            text = str(system)
         if text:
             messages.append({"role": "system", "content": text})
 
@@ -325,7 +327,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_messages(self):
         """Anthropic Messages API → Copilot → Anthropic response."""
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        length = int(self.headers.get("Content-Length", 0))
+        if length > MAX_BODY:
+            self._reply(413, {
+                "type": "error",
+                "error": {"type": "invalid_request_error", "message": "Request body too large"},
+            })
+            return
+        body = json.loads(self.rfile.read(length))
         original_model = body.get("model", "claude-sonnet-4")
         stream = body.get("stream", False)
 
@@ -378,20 +387,40 @@ class Handler(BaseHTTPRequestHandler):
 
         except HTTPError as exc:
             err_body = exc.read().decode("utf-8", errors="replace")
-            self.send_response(exc.code)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            try:
-                self.wfile.write(json.dumps({
-                    "type": "error",
-                    "error": {"type": "api_error", "message": err_body},
-                }).encode())
-            except Exception:
-                self.wfile.write(err_body.encode())
+            print(f"[proxy] upstream error {exc.code}: {err_body[:200]}")
+            status = exc.code
+            # Retry once on 401 (token may have expired)
+            if status == 401:
+                try:
+                    with _lock:
+                        _cache["expires"] = 0  # force refresh
+                    token, endpoint = _get_token()
+                    upstream.add_header("Authorization", f"Bearer {token}")
+                    retry = urlopen(upstream, timeout=300)
+                    if stream:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream")
+                        self.send_header("Cache-Control", "no-cache")
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                        _stream_from_copilot_sse(retry, self.wfile, original_model)
+                        self.wfile.flush()
+                    else:
+                        oai_data = json.loads(retry.read())
+                        anthropic_resp = _openai_to_anthropic(oai_data, original_model)
+                        self._reply(200, anthropic_resp)
+                    return
+                except Exception:
+                    pass  # fall through to error response
+            self._reply(status, {
+                "type": "error",
+                "error": {"type": "api_error", "message": f"Upstream error (HTTP {status})"},
+            })
         except Exception as exc:
+            print(f"[proxy] internal error: {exc}")
             self._reply(500, {
                 "type": "error",
-                "error": {"type": "api_error", "message": str(exc)},
+                "error": {"type": "api_error", "message": "Internal proxy error"},
             })
 
     def _handle_chat_completions(self):
@@ -451,12 +480,12 @@ def main():
         print("[proxy] Run: gh auth login -h github.com -p https -w", file=sys.stderr)
         sys.exit(1)
 
-    print(f"[proxy] Listening on http://0.0.0.0:{PORT}")
+    print(f"[proxy] Listening on http://{HOST}:{PORT}")
     print(f"[proxy] Anthropic API:  POST http://localhost:{PORT}/v1/messages")
     print(f"[proxy] OpenAI API:     POST http://localhost:{PORT}/v1/chat/completions")
     print(f"[proxy] Models:         GET  http://localhost:{PORT}/v1/models")
 
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

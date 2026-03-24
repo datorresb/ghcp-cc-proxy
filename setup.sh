@@ -109,12 +109,23 @@ done
 
 # ── 5. Configure Claude Code ────────────────────────────────────────
 
+# Project-level config lives in .claude/settings.json in the repo.
+# If running from within the project, that config is already in place.
+# We also write global ~/.claude/settings.json as a fallback for users
+# running Claude Code from outside the project directory.
+
 info "Configuring Claude Code to use proxy..."
 
+# Check if project-level config exists (running from within the repo)
+PROJECT_CLAUDE_CONFIG="${SCRIPT_DIR}/.claude/settings.json"
+if [ -f "$PROJECT_CLAUDE_CONFIG" ]; then
+    ok "Project-level Claude Code config found at .claude/settings.json"
+fi
+
+# Write global config as fallback
 CLAUDE_CONFIG_DIR="${HOME}/.claude"
 mkdir -p "$CLAUDE_CONFIG_DIR"
 
-# Write/update settings
 SETTINGS_FILE="${CLAUDE_CONFIG_DIR}/settings.json"
 if [ -f "$SETTINGS_FILE" ]; then
     # Merge into existing settings using python
@@ -142,7 +153,7 @@ else
 }
 SETTINGS
 fi
-ok "Claude Code configured → ANTHROPIC_BASE_URL=${PROXY_URL}"
+ok "Global Claude Code config updated → ANTHROPIC_BASE_URL=${PROXY_URL}"
 
 # ── 6. Summary ──────────────────────────────────────────────────────
 

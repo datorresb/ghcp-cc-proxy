@@ -37,6 +37,8 @@ MAX_BODY = 10 * 1024 * 1024  # 10 MB
 TOKEN_TTL = 600  # refresh every 10 min
 
 _lock = threading.Lock()
+_models_lock = threading.Lock()
+_request_semaphore = threading.Semaphore(int(os.environ.get("MAX_CONCURRENT", "32")))
 _cache: dict = {"token": None, "endpoint": None, "expires": 0}
 
 # ── Model mapping ────────────────────────────────────────────────────
@@ -88,6 +90,9 @@ def _map_model(model: str) -> str:
 
 # ── Token management ────────────────────────────────────────────────
 
+TOKEN_REFRESH_MARGIN = 60  # refresh 60s before expiry
+
+
 def _fetch_token() -> dict:
     gh_token = subprocess.check_output(
         ["gh", "auth", "token", "-h", "github.com"], text=True
@@ -100,20 +105,28 @@ def _fetch_token() -> dict:
             "Editor-Plugin-Version": "copilot-chat/0.40.0",
         },
     )
-    with urlopen(req, timeout=10) as resp:
-        data = json.loads(resp.read())
-    return {
-        "token": data["token"],
-        "endpoint": data.get("endpoints", {}).get(
-            "api", "https://api.githubcopilot.com"
-        ),
-        "expires": time.time() + TOKEN_TTL,
-    }
+    last_exc = None
+    for attempt in range(3):
+        try:
+            with urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+            return {
+                "token": data["token"],
+                "endpoint": data.get("endpoints", {}).get(
+                    "api", "https://api.githubcopilot.com"
+                ),
+                "expires": time.time() + TOKEN_TTL,
+            }
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(2 ** attempt + random.random())
+    raise last_exc
 
 
 def _get_token():
     with _lock:
-        if _cache["token"] is None or time.time() >= _cache["expires"]:
+        if _cache["token"] is None or time.time() >= (_cache["expires"] - TOKEN_REFRESH_MARGIN):
             _cache.update(_fetch_token())
         return _cache["token"], _cache["endpoint"]
 
@@ -210,12 +223,13 @@ def _anthropic_to_openai(body: dict) -> dict:
     thinking = body.get("thinking")
     if isinstance(thinking, dict) and thinking.get("type") == "enabled":
         budget = thinking.get("budget_tokens", 0)
-        if budget <= 2048:
-            result["reasoning_effort"] = "low"
-        elif budget <= 16384:
-            result["reasoning_effort"] = "medium"
-        else:
-            result["reasoning_effort"] = "high"
+        if budget > 0:
+            if budget <= 2048:
+                result["reasoning_effort"] = "low"
+            elif budget <= 16384:
+                result["reasoning_effort"] = "medium"
+            else:
+                result["reasoning_effort"] = "high"
 
     return result
 
@@ -236,6 +250,8 @@ def _openai_to_anthropic(oai: dict, model: str) -> dict:
         content.append({"type": "thinking", "thinking": reasoning_text})
     if text:
         content.append({"type": "text", "text": text})
+    if not content:
+        content.append({"type": "text", "text": ""})
 
     return {
         "id": f"msg_{uuid.uuid4().hex[:24]}",
@@ -408,6 +424,7 @@ def _stream_from_copilot_sse(upstream_resp, wfile, model: str):
 
 def _make_upstream_request(url, headers, body, timeout=300, max_retries=3):
     """Make an upstream POST request with retries and exponential backoff."""
+    headers = dict(headers)  # copy to avoid mutating caller's dict
     last_exc = None
     auth_retried = False
     attempt = 0
@@ -458,38 +475,52 @@ def _make_upstream_request(url, headers, body, timeout=300, max_retries=3):
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
+    def process_request(self, request, client_address):
+        if not _request_semaphore.acquire(timeout=5):
+            try:
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
+            except Exception:
+                pass
+            self.close_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        finally:
+            _request_semaphore.release()
+
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/v1/models":
-            now = time.time()
-            if _models_cache["data"] is not None and now < _models_cache["expires"]:
-                self._reply(200, _models_cache["data"])
-                return
-            try:
-                token, endpoint = _get_token()
-                req = Request(
-                    f"{endpoint}/models",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Editor-Version": "vscode/1.96.0",
-                        "Copilot-Integration-Id": "vscode-chat",
-                    },
-                )
-                with urlopen(req, timeout=10) as resp:
-                    data = json.loads(resp.read())
-                _models_cache["data"] = data
-                _models_cache["expires"] = now + MODELS_CACHE_TTL
-                self._reply(200, data)
-            except Exception:
-                fallback = {
-                    "object": "list",
-                    "data": [
-                        {"id": k, "object": "model", "owned_by": "anthropic"}
-                        for k in MODEL_MAP
-                    ],
-                }
-                self._reply(200, fallback)
+            with _models_lock:
+                now = time.time()
+                if _models_cache["data"] is not None and now < _models_cache["expires"]:
+                    self._reply(200, _models_cache["data"])
+                    return
+                try:
+                    token, endpoint = _get_token()
+                    req = Request(
+                        f"{endpoint}/models",
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Editor-Version": "vscode/1.96.0",
+                            "Copilot-Integration-Id": "vscode-chat",
+                        },
+                    )
+                    with urlopen(req, timeout=10) as resp:
+                        data = json.loads(resp.read())
+                    _models_cache["data"] = data
+                    _models_cache["expires"] = now + MODELS_CACHE_TTL
+                    self._reply(200, data)
+                except Exception:
+                    fallback = {
+                        "object": "list",
+                        "data": [
+                            {"id": k, "object": "model", "owned_by": "anthropic"}
+                            for k in MODEL_MAP
+                        ],
+                    }
+                    self._reply(200, fallback)
             return
         if self.path == "/health":
             self._reply(200, {"status": "ok"})
@@ -611,25 +642,22 @@ class Handler(BaseHTTPRequestHandler):
             self._reply(502, {"error": f"token error: {exc}"})
             return
 
-        upstream = Request(
-            f"{endpoint}/chat/completions",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Editor-Version": "vscode/1.96.0",
-                "Copilot-Integration-Id": "vscode-chat",
-            },
-            method="POST",
-        )
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Editor-Version": "vscode/1.96.0",
+            "Copilot-Integration-Id": "vscode-chat",
+        }
 
         try:
-            with urlopen(upstream, timeout=300) as r:
-                resp_body = r.read()
-                self.send_response(r.status)
-                self.send_header("Content-Type", r.headers.get("Content-Type", "application/json"))
-                self.end_headers()
-                self.wfile.write(resp_body)
+            resp = _make_upstream_request(
+                f"{endpoint}/chat/completions", headers, body,
+            )
+            resp_body = resp.read()
+            self.send_response(resp.status)
+            self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
+            self.end_headers()
+            self.wfile.write(resp_body)
         except HTTPError as exc:
             self.send_response(exc.code)
             self.send_header("Content-Type", "application/json")

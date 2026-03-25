@@ -1,0 +1,13 @@
+temp/
+__pycache__/
+*.pyc
+/tmp/
+*.log
+.env
+.mcp-servers/
+.pytest_cache/
+.vscode/
+.backlog/
+.context/
+.github/
+docs/

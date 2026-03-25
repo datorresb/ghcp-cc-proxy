@@ -1,7 +1,7 @@
 ---
 title: "feat: Enhance Copilot proxy — thinking, images, external models, retry, logging, tests, docs"
 type: feat
-status: active
+status: completed
 date: 2026-03-24
 origin: .backlog/backlog.md
 ---
